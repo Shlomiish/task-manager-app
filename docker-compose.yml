@@ -1,0 +1,175 @@
+version: '3.8'
+
+services:
+  # PD (Placement Driver)
+  pd:
+    image: pingcap/pd:latest
+    ports:
+      - '2379:2379'
+    volumes:
+      - pd-data:/data
+    command:
+      - --name=pd
+      - --data-dir=/data/pd
+      - --client-urls=http://0.0.0.0:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://pd:2379
+      - --advertise-peer-urls=http://pd:2380
+      - --initial-cluster=pd=http://pd:2380
+      - --log-file=/data/pd.log
+
+  # TiKV (Storage)
+  tikv:
+    image: pingcap/tikv:latest
+    ports:
+      - '20160:20160'
+    volumes:
+      - tikv-data:/data
+    command:
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=tikv:20160
+      - --data-dir=/data/tikv
+      - --pd=pd:2379
+      - --log-file=/data/tikv.log
+    depends_on:
+      - pd
+
+  # TiDB (SQL Layer)
+  tidb:
+    image: pingcap/tidb:latest
+    ports:
+      - '4000:4000'
+      - '10080:10080'
+    command:
+      - --store=tikv
+      - --path=pd:2379
+      - --advertise-address=tidb
+      - --log-file=/tmp/tidb.log
+    depends_on:
+      - tikv
+
+  # Initialize Database
+  db-init:
+    image: mysql:8.0
+    depends_on:
+      - tidb
+    volumes:
+      - ./backend/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    command: >
+      bash -c "
+        echo 'Waiting for TiDB to be ready...' &&
+        sleep 20 &&
+        mysql -h tidb -P 4000 -u root < /docker-entrypoint-initdb.d/init.sql &&
+        echo 'Database initialized successfully'
+      "
+    restart: on-failure
+
+  # Zookeeper
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  # Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    ports:
+      - '9092:9092'
+    env_file:
+      - ./.env
+
+  # TiCDC
+  ticdc:
+    image: pingcap/ticdc:latest
+    ports:
+      - '8300:8300'
+    command:
+      - /cdc
+      - server
+      - --addr=0.0.0.0:8300
+      - --advertise-addr=ticdc:8300
+      - --pd=http://pd:2379
+      - --log-file=/tmp/ticdc.log
+    depends_on:
+      - pd
+      - tidb
+      - kafka
+    restart: on-failure
+
+  # CDC Changefeed Creator
+  cdc-config:
+    image: pingcap/ticdc:latest
+    depends_on:
+      - ticdc
+    command: >
+      sh -c "
+        echo 'Waiting for TiCDC to be ready...' &&
+        sleep 30 &&
+        /cdc cli changefeed create \
+          --server=http://ticdc:8300 \
+          --sink-uri='kafka://kafka:29092/tidb-cdc?protocol=canal-json&kafka-version=2.6.0' \
+          --changefeed-id='task-manager-cdc' &&
+        echo 'CDC Changefeed created successfully' &&
+        tail -f /dev/null
+      "
+    restart: on-failure
+
+  # Backend API
+  backend: # Node.js API server handling authentication and task management
+    build: ./backend # builds image from backend Dockerfile
+    ports:
+      - '3001:3001' # exposes API port for frontend requests
+    depends_on:
+      - db-init # waits for database initialization to complete
+      - kafka # ensures Kafka is available for future CDC integration
+    environment:
+      DB_HOST: tidb # TiDB container hostname on Docker network
+      DB_PORT: 4000 # TiDB's MySQL-compatible port
+      DB_USER: root # database username for authentication
+      DB_PASSWORD: '' # empty password for local development (root has no password by default)
+      DB_NAME: taskmanager # target database name to connect to
+      JWT_SECRET: helfy-test # secret key for signing and verifying JWT tokens
+    restart: on-failure # restarts on crashes or connection failures
+    
+# Kafka
+  kafka: # distributed message broker for streaming CDC events
+    image: confluentinc/cp-kafka:7.5.0 # Confluent's Kafka distribution
+    depends_on:
+      - zookeeper # requires Zookeeper for cluster coordination and metadata storage
+    ports:
+      - '9092:9092' # exposes Kafka broker port for external client connections
+    environment:
+      KAFKA_BROKER_ID: 1 # unique identifier for this Kafka broker in the cluster
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181 # Zookeeper connection string for cluster coordination
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092 # advertises two listeners: internal Docker network and localhost
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT # maps listener names to security protocols (no encryption)
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT # specifies which listener brokers use to communicate with each other
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1 # replication factor for internal offset tracking topic (1 since single broker)
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true' # automatically creates topics when producers/consumers reference them
+
+  # Frontend
+  frontend:
+    build: ./frontend
+    ports:
+      - '3000:80'
+    depends_on:
+      - backend
+
+  # Log viewer UI
+  dozzle:
+    image: amir20/dozzle:latest
+    ports:
+      - '9999:8080'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  pd-data:
+  tikv-data:
+
+networks:
+  default:
+    name: taskmanager-network
