@@ -46,7 +46,6 @@ Open Dozzle at http://localhost:9999
 ## Access Application
 
 - **Frontend:** http://localhost:3000
-- **Backend API:** http://localhost:3001
 - **Logs Dashboard:** http://localhost:9999
 
 ## Default Credentials
