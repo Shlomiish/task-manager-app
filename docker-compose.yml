@@ -71,16 +71,6 @@ services:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
 
-  # Kafka
-  kafka:
-    image: confluentinc/cp-kafka:7.5.0
-    depends_on:
-      - zookeeper
-    ports:
-      - '9092:9092'
-    env_file:
-      - ./.env
-
   # TiCDC
   ticdc:
     image: pingcap/ticdc:latest
@@ -118,36 +108,36 @@ services:
     restart: on-failure
 
   # Backend API
-  backend: # Node.js API server handling authentication and task management
-    build: ./backend # builds image from backend Dockerfile
+  backend:
+    build: ./backend
     ports:
-      - '3001:3001' # exposes API port for frontend requests
+      - '3001:3001'
     depends_on:
-      - db-init # waits for database initialization to complete
-      - kafka # ensures Kafka is available for future CDC integration
+      - db-init
+      - kafka
     environment:
-      DB_HOST: tidb # TiDB container hostname on Docker network
-      DB_PORT: 4000 # TiDB's MySQL-compatible port
-      DB_USER: root # database username for authentication
-      DB_PASSWORD: '' # empty password for local development (root has no password by default)
+      DB_HOST: tidb
+      DB_PORT: 4000
+      DB_USER: root
+      DB_PASSWORD: ''
       DB_NAME: taskmanager # target database name to connect to
       JWT_SECRET: helfy-test # secret key for signing and verifying JWT tokens
-    restart: on-failure # restarts on crashes or connection failures
-    
-# Kafka
-  kafka: # distributed message broker for streaming CDC events
+    restart: on-failure
+
+    # Kafka
+  kafka:
     image: confluentinc/cp-kafka:7.5.0 # Confluent's Kafka distribution
     depends_on:
-      - zookeeper # requires Zookeeper for cluster coordination and metadata storage
+      - zookeeper
     ports:
       - '9092:9092' # exposes Kafka broker port for external client connections
     environment:
-      KAFKA_BROKER_ID: 1 # unique identifier for this Kafka broker in the cluster
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181 # Zookeeper connection string for cluster coordination
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092 # advertises two listeners: internal Docker network and localhost
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT # maps listener names to security protocols (no encryption)
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT # specifies which listener brokers use to communicate with each other
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1 # replication factor for internal offset tracking topic (1 since single broker)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true' # automatically creates topics when producers/consumers reference them
 
   # Frontend
